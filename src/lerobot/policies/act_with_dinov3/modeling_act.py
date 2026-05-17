@@ -35,10 +35,14 @@ from torch import Tensor, nn
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.misc import FrozenBatchNorm2d
 
-from lerobot.policies.act.configuration_act import ACTConfig
+# from lerobot.policies.act.configuration_act import ACTConfig
+from lerobot.policies.act_with_dinov3.configuration_act import ACTWithDINOv3Config
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 
+# for DINOv3
+REPO_DIR = "/data/satoya_sugimoto/dinov3/dinov3"
+WEIGHT_DIR = "/data/satoya_sugimoto/dinov3/dinov3/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
 
 class ACTPolicy(PreTrainedPolicy):
     """
@@ -46,12 +50,12 @@ class ACTPolicy(PreTrainedPolicy):
     Hardware (paper: https://huggingface.co/papers/2304.13705, code: https://github.com/tonyzhaozh/act)
     """
 
-    config_class = ACTConfig
-    name = "act"
+    config_class = ACTWithDINOv3Config
+    name = "act_with_dinov3"
 
     def __init__(
         self,
-        config: ACTConfig,
+        config: ACTWithDINOv3Config,
         **kwargs,
     ):
         """
@@ -290,7 +294,7 @@ class ACT(nn.Module):
                                 └───────────────────────┘
     """
 
-    def __init__(self, config: ACTConfig):
+    def __init__(self, config: ACTWithDINOv3Config):
         # BERT style VAE encoder with input tokens [cls, robot_state, *action_sequence].
         # The cls token forms parameters of the latent's distribution (like this [*means, *log_variances]).
         super().__init__()
@@ -322,17 +326,32 @@ class ACT(nn.Module):
             )
 
         # Backbone for image feature extraction.
-        # Bockbone: Resnet18
+        # # Bockbone: Resnet18
+        # if self.config.image_features:
+        #     backbone_model = getattr(torchvision.models, config.vision_backbone)(
+        #         replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
+        #         weights=config.pretrained_backbone_weights,
+        #         norm_layer=FrozenBatchNorm2d,
+        #     )
+        #     # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
+        #     # feature map).
+        #     # Note: The forward method of this returns a dict: {"feature_map": output}.
+        #     self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+        # Bockbone: DINOv3
         if self.config.image_features:
-            backbone_model = getattr(torchvision.models, config.vision_backbone)(
-                replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
-                weights=config.pretrained_backbone_weights,
-                norm_layer=FrozenBatchNorm2d,
-            )
-            # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
-            # feature map).
-            # Note: The forward method of this returns a dict: {"feature_map": output}.
-            self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+            # load DINOv3
+            self.backbone = torch.hub.load(
+                REPO_DIR, 
+                'dinov3_vits16', 
+                source='local', 
+                weights=WEIGHT_DIR
+            ).cuda()
+            self.backbone.eval() # eval mode 
+
+            for param in self.backbone.parameters():  # freeze the backbone
+                param.requires_grad = False
+
+            dino_embed_dim = self.backbone.embed_dim  # 出力次元数：384 DINOv3's feature dimension (384 for vit-s16)
 
         # Transformer (acts as VAE decoder when training with the variational objective).
         self.encoder = ACTEncoder(config)
@@ -349,9 +368,13 @@ class ACT(nn.Module):
                 self.config.env_state_feature.shape[0], config.dim_model
             )
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
+        # if self.config.image_features:
+        #     self.encoder_img_feat_input_proj = nn.Conv2d(
+        #         backbone_model.fc.in_features, config.dim_model, kernel_size=1
+        #     )
         if self.config.image_features:
             self.encoder_img_feat_input_proj = nn.Conv2d(
-                backbone_model.fc.in_features, config.dim_model, kernel_size=1
+                dino_embed_dim, config.dim_model, kernel_size=1
             )
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
@@ -468,15 +491,57 @@ class ACT(nn.Module):
         if self.config.env_state_feature:
             encoder_in_tokens.append(self.encoder_env_state_input_proj(batch[OBS_ENV_STATE]))
 
+        # if self.config.image_features:
+        #     # For a list of images, the H and W may vary but H*W is constant.
+        #     # NOTE: If modifying this section, verify on MPS devices that
+        #     # gradients remain stable (no explosions or NaNs).
+        #     for img in batch[OBS_IMAGES]:
+        #         cam_features = self.backbone(img)["feature_map"]
+        #         cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
+        #         cam_features = self.encoder_img_feat_input_proj(cam_features)
+
+        #         # Rearrange features to (sequence, batch, dim).
+        #         cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
+        #         cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
+
+        #         # Extend immediately instead of accumulating and concatenating
+        #         # Convert to list to extend properly
+        #         encoder_in_tokens.extend(list(cam_features))
+        #         encoder_in_pos_embed.extend(list(cam_pos_embed))
         if self.config.image_features:
-            # For a list of images, the H and W may vary but H*W is constant.
-            # NOTE: If modifying this section, verify on MPS devices that
-            # gradients remain stable (no explosions or NaNs).
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)  # DINOv3's normalization mean 
+            std = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)  # DINOv3's normalization std
+
             for img in batch[OBS_IMAGES]:
-                cam_features = self.backbone(img)["feature_map"]
+                # NOTE: Image shape is Multiples of 16 (DINOv3のパッチサイズが16のため)。もしそうでない場合は、リサイズなどの前処理が必要。
+                B, C, H, W = img.shape
+                if H % 16 != 0 or W % 16 != 0:
+                    raise ValueError(f"Image height and width must be multiples of 16, but got {H} and {W}.")
+                
+                # LeRobotの画像テンソル(0~1)をDINOv3向けに正規化 (デバイスを合わせる)
+                img_normalized = (img - mean.to(img.device)) / std.to(img.device)
+                
+                with torch.no_grad():
+                    # forward_featuresで特徴量を取得
+                    feats = self.backbone.forward_features(img_normalized)
+                    # パッチトークンを取得: (B, N, D)
+                    patch_tokens = feats['x_norm_patchtokens']
+                
+                # vits16なのでパッチサイズは16
+                patch_size = 16
+                h_feat, w_feat = H // patch_size, W // patch_size
+                
+                # 1次元のパッチトークン列を空間マップに再構成
+                # (B, H/16 * W/16, D) -> (B, D, H/16, W/16)
+                cam_features = patch_tokens.reshape(B, h_feat, w_feat, -1).permute(0, 3, 1, 2)
+
+                # 💡 【ここに追加】2x2のAverage Poolingをかけて空間解像度を半分にする
+                # これによりトークン数が1/4になり、Attentionのメモリ消費が1/16になります
+                cam_features = torch.nn.functional.avg_pool2d(cam_features, kernel_size=2, stride=2)
+
                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
                 cam_features = self.encoder_img_feat_input_proj(cam_features)
-
+                
                 # Rearrange features to (sequence, batch, dim).
                 cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
                 cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
@@ -485,6 +550,7 @@ class ACT(nn.Module):
                 # Convert to list to extend properly
                 encoder_in_tokens.extend(list(cam_features))
                 encoder_in_pos_embed.extend(list(cam_pos_embed))
+        
 
         # Stack all tokens along the sequence dimension.
         encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)
@@ -516,7 +582,7 @@ class ACT(nn.Module):
 class ACTEncoder(nn.Module):
     """Convenience module for running multiple encoder layers, maybe followed by normalization."""
 
-    def __init__(self, config: ACTConfig, is_vae_encoder: bool = False):
+    def __init__(self, config: ACTWithDINOv3Config, is_vae_encoder: bool = False):
         super().__init__()
         self.is_vae_encoder = is_vae_encoder
         num_layers = config.n_vae_encoder_layers if self.is_vae_encoder else config.n_encoder_layers
@@ -533,7 +599,7 @@ class ACTEncoder(nn.Module):
 
 
 class ACTEncoderLayer(nn.Module):
-    def __init__(self, config: ACTConfig):
+    def __init__(self, config: ACTWithDINOv3Config):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(config.dim_model, config.n_heads, dropout=config.dropout)
 
@@ -572,7 +638,7 @@ class ACTEncoderLayer(nn.Module):
 
 
 class ACTDecoder(nn.Module):
-    def __init__(self, config: ACTConfig):
+    def __init__(self, config: ACTWithDINOv3Config):
         """Convenience module for running multiple decoder layers followed by normalization."""
         super().__init__()
         self.layers = nn.ModuleList([ACTDecoderLayer(config) for _ in range(config.n_decoder_layers)])
@@ -595,7 +661,7 @@ class ACTDecoder(nn.Module):
 
 
 class ACTDecoderLayer(nn.Module):
-    def __init__(self, config: ACTConfig):
+    def __init__(self, config: ACTWithDINOv3Config):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(config.dim_model, config.n_heads, dropout=config.dropout)
         self.multihead_attn = nn.MultiheadAttention(config.dim_model, config.n_heads, dropout=config.dropout)

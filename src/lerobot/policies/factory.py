@@ -30,6 +30,7 @@ from lerobot.datasets.utils import dataset_to_policy_features
 from lerobot.envs.configs import EnvConfig
 from lerobot.envs.utils import env_to_policy_features
 from lerobot.policies.act.configuration_act import ACTConfig
+from lerobot.policies.act_with_dinov3.configuration_act import ACTWithDINOv3Config
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
@@ -85,6 +86,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         return DiffusionPolicy
     elif name == "act":
         from lerobot.policies.act.modeling_act import ACTPolicy
+
+        return ACTPolicy
+    elif name == "act_with_dinov3":
+        from lerobot.policies.act_with_dinov3.modeling_act import ACTPolicy
 
         return ACTPolicy
     elif name == "vqbet":
@@ -147,7 +152,7 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
 
     Args:
         policy_type: The type of the policy. Supported types include "tdmpc",
-                     "diffusion", "act", "vqbet", "pi0", "pi05", "sac", "smolvla",
+                     "diffusion", "act", "act_with_dinov3", "vqbet", "pi0", "pi05", "sac", "smolvla",
                      "reward_classifier", "wall_x".
         **kwargs: Keyword arguments to be passed to the configuration class constructor.
 
@@ -163,6 +168,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return DiffusionConfig(**kwargs)
     elif policy_type == "act":
         return ACTConfig(**kwargs)
+    elif policy_type == "act_with_dinov3":
+        return ACTWithDINOv3Config(**kwargs)
     elif policy_type == "vqbet":
         return VQBeTConfig(**kwargs)
     elif policy_type == "pi0":
@@ -303,6 +310,14 @@ def make_pre_post_processors(
 
     elif isinstance(policy_cfg, ACTConfig):
         from lerobot.policies.act.processor_act import make_act_pre_post_processors
+
+        processors = make_act_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+    
+    elif isinstance(policy_cfg, ACTWithDINOv3Config):
+        from lerobot.policies.act_with_dinov3.processor_act import make_act_pre_post_processors
 
         processors = make_act_pre_post_processors(
             config=policy_cfg,

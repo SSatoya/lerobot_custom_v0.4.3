@@ -20,9 +20,9 @@ from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
 
 
-@PreTrainedConfig.register_subclass("act")
+@PreTrainedConfig.register_subclass("act_with_dinov3")
 @dataclass
-class ACTConfig(PreTrainedConfig):
+class ACTWithDINOv3Config(PreTrainedConfig):
     """Configuration class for the Action Chunking Transformers policy.
 
     Defaults are configured for training on bimanual Aloha tasks like "insertion" or "transfer".
@@ -97,7 +97,7 @@ class ACTConfig(PreTrainedConfig):
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
-            "VISUAL": NormalizationMode.MEAN_STD,
+            # "VISUAL": NormalizationMode.MEAN_STD,  
             "STATE": NormalizationMode.MEAN_STD,
             "ACTION": NormalizationMode.MEAN_STD,
         }
@@ -105,8 +105,8 @@ class ACTConfig(PreTrainedConfig):
 
     # Architecture.
     # Vision backbone.
-    vision_backbone: str = "resnet18"
-    pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
+    vision_backbone: str = "dinov3_vits16"
+    pretrained_backbone_weights: str | None = None
     replace_final_stride_with_dilation: int = False
     # Transformer layers.
     pre_norm: bool = False
@@ -141,7 +141,7 @@ class ACTConfig(PreTrainedConfig):
         super().__post_init__()
 
         """Input validation (not exhaustive)."""
-        if not self.vision_backbone.startswith("resnet"):
+        if not self.vision_backbone.startswith("dinov3"):
             raise ValueError(
                 f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
             )

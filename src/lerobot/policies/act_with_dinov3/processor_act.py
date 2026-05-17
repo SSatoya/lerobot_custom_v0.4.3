@@ -17,7 +17,7 @@ from typing import Any
 
 import torch
 
-from lerobot.policies.act.configuration_act import ACTConfig
+from lerobot.policies.act_with_dinov3.configuration_act import ACTWithDINOv3Config
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
@@ -32,7 +32,7 @@ from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PR
 
 
 def make_act_pre_post_processors(
-    config: ACTConfig,
+    config: ACTWithDINOv3Config,
     dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
 ) -> tuple[
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
@@ -44,7 +44,7 @@ def make_act_pre_post_processors(
     The post-processing pipeline handles unnormalization and moves the model outputs back to the CPU.
 
     Args:
-        config (ACTConfig): The ACT policy configuration object.
+        config (ACTWithDINOv3Config): The ACT policy configuration object.
         dataset_stats (dict[str, dict[str, torch.Tensor]] | None): A dictionary containing dataset
             statistics (e.g., mean and std) used for normalization. Defaults to None.
 
